@@ -17,20 +17,22 @@ import {
 } from '@/types/coralRecord'
 import { bleachGrade, bleachIndex, bleachedSharePct, coralCoveragePct, fishDensity, round } from '@/utils/bleach'
 
-/** 备份集合键名 */
-export const BACKUP_KEYS = ['reefs', 'sites', 'belts', 'corals', 'fishes'] as const
+/** 备份集合键名（含巡护队侧报备单与禁入期） */
+export const BACKUP_KEYS = ['reefs', 'sites', 'belts', 'corals', 'fishes', 'patrolReports', 'noEntryPeriods'] as const
 export type BackupKey = (typeof BACKUP_KEYS)[number]
 
 export type CountMap = Record<BackupKey, number>
 
 /** 组装当前本地数据的完整快照 */
 export async function buildBackupPayload(): Promise<BackupPayload> {
-  const [reefs, sites, belts, corals, fishes] = await Promise.all([
+  const [reefs, sites, belts, corals, fishes, patrolReports, noEntryPeriods] = await Promise.all([
     db.reefs.toArray(),
     db.sites.toArray(),
     db.belts.toArray(),
     db.corals.toArray(),
-    db.fishes.toArray()
+    db.fishes.toArray(),
+    db.patrolReports.toArray(),
+    db.noEntryPeriods.toArray()
   ])
   return {
     app: 'gbcoralbelt',
@@ -40,7 +42,9 @@ export async function buildBackupPayload(): Promise<BackupPayload> {
     sites,
     belts,
     corals,
-    fishes
+    fishes,
+    patrolReports,
+    noEntryPeriods
   }
 }
 
@@ -54,8 +58,13 @@ export function validateBackup(input: unknown): { ok: boolean; errors: string[];
   if (obj.app !== undefined && obj.app !== 'gbcoralbelt') {
     errors.push('app 字段应为 gbcoralbelt，文件来源不明')
   }
-  for (const key of BACKUP_KEYS) {
+  // 核心五张表必须是数组；巡护队侧两张表为可选（旧版备份可能不含），缺失时按空表导入
+  const requiredKeys = ['reefs', 'sites', 'belts', 'corals', 'fishes'] as const
+  for (const key of requiredKeys) {
     if (!Array.isArray(obj[key])) errors.push(`${key} 字段缺失或不是数组`)
+  }
+  for (const key of ['patrolReports', 'noEntryPeriods'] as const) {
+    if (obj[key] !== undefined && !Array.isArray(obj[key])) errors.push(`${key} 字段不是数组`)
   }
   if (errors.length > 0) return { ok: false, errors, payload: null }
   const payload: BackupPayload = {
@@ -66,7 +75,9 @@ export function validateBackup(input: unknown): { ok: boolean; errors: string[];
     sites: obj.sites ?? [],
     belts: obj.belts ?? [],
     corals: obj.corals ?? [],
-    fishes: obj.fishes ?? []
+    fishes: obj.fishes ?? [],
+    patrolReports: obj.patrolReports ?? [],
+    noEntryPeriods: obj.noEntryPeriods ?? []
   }
   return { ok: true, errors, payload }
 }
@@ -78,7 +89,9 @@ export function countPayload(payload: BackupPayload): CountMap {
     sites: payload.sites.length,
     belts: payload.belts.length,
     corals: payload.corals.length,
-    fishes: payload.fishes.length
+    fishes: payload.fishes.length,
+    patrolReports: payload.patrolReports.length,
+    noEntryPeriods: payload.noEntryPeriods.length
   }
 }
 
@@ -114,13 +127,19 @@ export function readFileText(file: File): Promise<string> {
 /** 导入快照：overwrite=true 先清空全部表，否则按主键合并 */
 export async function importBackup(payload: BackupPayload, overwrite: boolean): Promise<CountMap> {
   if (overwrite) await clearAllTables()
-  await db.transaction('rw', [db.reefs, db.sites, db.belts, db.corals, db.fishes], async () => {
-    await db.reefs.bulkPut(payload.reefs)
-    await db.sites.bulkPut(payload.sites)
-    await db.belts.bulkPut(payload.belts)
-    await db.corals.bulkPut(payload.corals)
-    await db.fishes.bulkPut(payload.fishes)
-  })
+  await db.transaction(
+    'rw',
+    [db.reefs, db.sites, db.belts, db.corals, db.fishes, db.patrolReports, db.noEntryPeriods],
+    async () => {
+      await db.reefs.bulkPut(payload.reefs)
+      await db.sites.bulkPut(payload.sites)
+      await db.belts.bulkPut(payload.belts)
+      await db.corals.bulkPut(payload.corals)
+      await db.fishes.bulkPut(payload.fishes)
+      await db.patrolReports.bulkPut(payload.patrolReports)
+      await db.noEntryPeriods.bulkPut(payload.noEntryPeriods)
+    }
+  )
   return countPayload(payload)
 }
 

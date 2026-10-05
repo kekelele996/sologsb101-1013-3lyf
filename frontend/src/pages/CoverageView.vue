@@ -46,7 +46,15 @@ const router = useRouter()
 const reefStore = useReefStore()
 const surveyStore = useSurveyStore()
 
-const EMPTY_COUNTS: CountMap = { reefs: 0, sites: 0, belts: 0, corals: 0, fishes: 0 }
+const EMPTY_COUNTS: CountMap = {
+  reefs: 0,
+  sites: 0,
+  belts: 0,
+  corals: 0,
+  fishes: 0,
+  patrolReports: 0,
+  noEntryPeriods: 0
+}
 
 const counts = ref<CountMap>(EMPTY_COUNTS)
 const lastBackupAt = ref<string | null>(null)
@@ -479,6 +487,7 @@ onMounted(() => {
         <el-descriptions-item label="礁区 / 站位">{{ counts.reefs }} / {{ counts.sites }}</el-descriptions-item>
         <el-descriptions-item label="样带 / 珊瑚记录">{{ counts.belts }} / {{ counts.corals }}</el-descriptions-item>
         <el-descriptions-item label="鱼类计数">{{ counts.fishes }}</el-descriptions-item>
+        <el-descriptions-item label="报备单 / 禁入期">{{ counts.patrolReports }} / {{ counts.noEntryPeriods }}</el-descriptions-item>
         <el-descriptions-item label="最近备份时间">
           {{ lastBackupAt ? new Date(lastBackupAt).toLocaleString('zh-CN') : '尚未备份' }}
         </el-descriptions-item>

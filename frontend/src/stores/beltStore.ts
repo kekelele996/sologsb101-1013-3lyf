@@ -100,10 +100,21 @@ export const useBeltStore = defineStore('belt', () => {
 
   async function createBelt(
     siteId: string,
-    payload: Omit<Belt, 'id' | 'createdAt' | 'updatedAt' | 'siteId'>
+    payload: Omit<Belt, 'id' | 'createdAt' | 'updatedAt' | 'siteId' | 'reportState' | 'suspendReason' | 'reportId' | 'syncedToPatrol'> &
+      Partial<Pick<Belt, 'reportState' | 'suspendReason' | 'reportId' | 'syncedToPatrol'>>
   ): Promise<Belt> {
     const now = Date.now()
-    const row: Belt = { ...payload, siteId, id: createId('belt'), createdAt: now, updatedAt: now }
+    const row: Belt = {
+      reportState: '未报备',
+      suspendReason: '',
+      reportId: null,
+      syncedToPatrol: false,
+      ...payload,
+      siteId,
+      id: createId('belt'),
+      createdAt: now,
+      updatedAt: now
+    }
     await db.belts.put(row)
     return row
   }

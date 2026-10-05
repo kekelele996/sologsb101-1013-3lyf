@@ -7,7 +7,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, Edit, Plus, Right, Warning } from '@element-plus/icons-vue'
+import { Delete, Edit, Plus, Refresh, Right, Warning } from '@element-plus/icons-vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import BleachTag from '@/components/common/BleachTag.vue'
@@ -15,6 +15,9 @@ import RouteMissingPanel from '@/components/common/RouteMissingPanel.vue'
 import { useReefStore } from '@/stores/reefStore'
 import { ORIENTATION_ORDER, useBeltStore } from '@/stores/beltStore'
 import { useSurveyStore } from '@/stores/surveyStore'
+import { usePatrolStore } from '@/stores/patrolStore'
+import { BELT_REPORT_STATE_TYPE } from '@/types/patrol'
+import type { BeltReportState } from '@/types/patrol'
 import { BELT_LENGTH_PRESETS, ORIENTATIONS } from '@/types/belt'
 import type { Belt, Orientation } from '@/types/belt'
 import { bleachGrade, bleachIndex, coralCoveragePct, fishDensity } from '@/utils/bleach'
@@ -25,6 +28,7 @@ const router = useRouter()
 const reefStore = useReefStore()
 const beltStore = useBeltStore()
 const surveyStore = useSurveyStore()
+const patrolStore = usePatrolStore()
 
 const siteId = computed(() => String(route.params.id ?? ''))
 const site = computed(() => reefStore.siteById(siteId.value))
@@ -63,6 +67,14 @@ const rows = computed(() =>
 )
 
 const conflicts = computed(() => beltStore.findBeltConflicts(siteId.value))
+
+/** 本站位挂起 / 待核样带数 */
+const pendingCount = computed(
+  () =>
+    beltStore
+      .beltsOfSite(siteId.value)
+      .filter((belt) => belt.reportState === '已挂起' || belt.reportState === '待核').length
+)
 
 const stats = computed(() => {
   const belts = beltStore.beltsOfSite(siteId.value)
@@ -139,11 +151,18 @@ async function submitForm(): Promise<void> {
     }
     if (editingId.value) {
       await beltStore.updateBelt(editingId.value, payload)
-      ElMessage.success('样带已更新')
+      await patrolStore.reconcileAll()
+      ElMessage.success('样带已更新并重新对账')
     } else {
       const created = await beltStore.createBelt(siteId.value, payload)
       beltStore.selectBelt(created.id)
-      ElMessage.success(`样带 ${created.no}（${created.orientation}向 ${created.lengthM} m）已布设，可录入底质与珊瑚计数`)
+      // 普查队样带已写入，再向巡护队侧登记报备；失败只标记巡护队侧待重试，不重写普查队样带
+      const result = await patrolStore.syncOne(created, site.value?.no ?? '')
+      if (result.ok) {
+        ElMessage.success(`样带 ${created.no}（${created.orientation}向 ${created.lengthM} m）已布设并向巡护队报备`)
+      } else {
+        ElMessage.warning(`样带 ${created.no} 已录入，但巡护队侧报备失败（${result.error ?? '未知错误'}），可在巡护队页重试`)
+      }
     }
     dialogVisible.value = false
   } finally {
@@ -180,6 +199,23 @@ async function applyOrientationOrder(): Promise<void> {
   )
 }
 
+/** 录完一批样带后按站位编号跟巡护队对账 */
+async function reconcile(): Promise<void> {
+  const changed = await patrolStore.reconcileAll()
+  ElMessage.success(`对账完成，${changed} 条样带状态发生变化`)
+}
+
+/** 巡护队侧写入失败时只重试巡护队一侧（普查队样带已落库） */
+async function retryPatrol(belt: Belt): Promise<void> {
+  const result = await patrolStore.retryPatrolSync(belt, site.value?.no ?? '')
+  if (result.ok) ElMessage.success(`样带 ${belt.no} 已重新同步巡护队`)
+  else ElMessage.warning(`巡护队侧仍写入失败：${result.error ?? '未知错误'}`)
+}
+
+function beltReportTagType(state: BeltReportState) {
+  return BELT_REPORT_STATE_TYPE[state]
+}
+
 function gotoCorals(belt: Belt): void {
   beltStore.selectBelt(belt.id)
   void router.push(`/belts/${belt.id}/corals`)
@@ -192,6 +228,7 @@ function gotoFishes(belt: Belt): void {
 
 onMounted(() => {
   if (reefStore.reefs.length === 0) void initDatabase()
+  patrolStore.start()
   if (site.value) reefStore.selectSite(site.value.id)
 })
 </script>
@@ -236,6 +273,7 @@ onMounted(() => {
         </div>
         <div class="page__actions">
           <el-button :icon="Warning" @click="applyOrientationOrder">朝向排序校验</el-button>
+          <el-button :icon="Refresh" @click="reconcile">跟巡护队对账</el-button>
           <el-button type="primary" :icon="Plus" @click="openCreate">新增样带</el-button>
         </div>
       </div>
@@ -253,6 +291,15 @@ onMounted(() => {
         show-icon
         :closable="false"
         :title="`朝向排序校验提示：${conflicts.join('、')} 存在重复编号，请调整后再开展普查`"
+      />
+
+      <el-alert
+        v-if="pendingCount > 0"
+        type="error"
+        show-icon
+        :closable="false"
+        class="page__pending-alert"
+        :title="`本站位有 ${pendingCount} 条样带落在未批准范围（挂起 / 待核），需补报通过或撤销禁入期后放行；挂起样带仍进礁区结论，但报备口径以巡护队为准。`"
       />
 
       <EmptyPanel
@@ -307,10 +354,36 @@ onMounted(() => {
             <div class="gb-hint gb-mono">指数 {{ row.bleachIndex }}</div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="260" fixed="right">
+        <el-table-column label="报备状态" width="170">
+          <template #default="{ row }">
+            <el-tag size="small" :type="beltReportTagType(row.belt.reportState)">
+              {{ row.belt.reportState }}
+            </el-tag>
+            <el-tag
+              v-if="!row.belt.syncedToPatrol"
+              size="small"
+              type="info"
+              effect="plain"
+              class="page__sync-tag"
+            >
+              巡护队未同步
+            </el-tag>
+            <div v-if="row.belt.suspendReason" class="gb-hint page__reason">{{ row.belt.suspendReason }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="320" fixed="right">
           <template #default="{ row }">
             <el-button size="small" type="primary" :icon="Right" @click="gotoCorals(row.belt)">珊瑚</el-button>
             <el-button size="small" @click="gotoFishes(row.belt)">鱼类</el-button>
+            <el-button
+              v-if="!row.belt.syncedToPatrol"
+              size="small"
+              type="warning"
+              plain
+              @click="retryPatrol(row.belt)"
+            >
+              重试巡护队
+            </el-button>
             <el-button size="small" :icon="Edit" @click="openEdit(row.belt)">编辑</el-button>
             <el-button size="small" type="danger" plain :icon="Delete" @click="removeBelt(row.belt)">删除</el-button>
           </template>
@@ -406,5 +479,18 @@ onMounted(() => {
   flex-wrap: wrap;
   gap: 2px;
   margin-top: 4px;
+}
+
+.page__pending-alert {
+  margin-top: 4px;
+}
+
+.page__sync-tag {
+  margin-left: 6px;
+}
+
+.page__reason {
+  margin-top: 2px;
+  max-width: 220px;
 }
 </style>

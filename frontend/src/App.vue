@@ -5,10 +5,11 @@
  */
 import { computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { DataLine, Files, Grid, Odometer, PieChart } from '@element-plus/icons-vue'
+import { DataLine, Files, Grid, Odometer, PieChart, Stamp } from '@element-plus/icons-vue'
 import { useReefStore } from '@/stores/reefStore'
 import { useBeltStore } from '@/stores/beltStore'
 import { useSurveyStore } from '@/stores/surveyStore'
+import { usePatrolStore } from '@/stores/patrolStore'
 import { DB_NAME, DB_VERSION } from '@/utils/db'
 
 const route = useRoute()
@@ -16,11 +17,14 @@ const router = useRouter()
 const reefStore = useReefStore()
 const beltStore = useBeltStore()
 const surveyStore = useSurveyStore()
+const patrolStore = usePatrolStore()
 
 onMounted(() => {
   reefStore.start()
   beltStore.start()
   surveyStore.start()
+  patrolStore.start()
+  void patrolStore.reconcileAll()
 })
 
 /** 层级路由统一归属到最上层导航项 */
@@ -28,13 +32,25 @@ const activeKey = computed(() => {
   if (route.path.startsWith('/reefs/')) return '/reefs'
   if (route.path.startsWith('/sites/')) return '/reefs'
   if (route.path.startsWith('/belts/')) return '/coverage'
+  if (route.path.startsWith('/patrol')) return '/patrol'
   return route.path
 })
 
 const navItems = computed(() => [
   { key: '/reefs', label: '礁区台账', icon: Odometer, badge: String(reefStore.reefs.length) },
-  { key: '/coverage', label: '覆盖度汇总', icon: PieChart, badge: String(surveyStore.corals.length) }
+  { key: '/coverage', label: '覆盖度汇总', icon: PieChart, badge: String(surveyStore.corals.length) },
+  {
+    key: '/patrol',
+    label: '巡护报备',
+    icon: Stamp,
+    badge: pendingCount.value > 0 ? String(pendingCount.value) : ''
+  }
 ])
+
+/** 挂起 / 待核样带数（巡护报备角标） */
+const pendingCount = computed(() =>
+  beltStore.belts.filter((belt) => belt.reportState === '已挂起' || belt.reportState === '待核').length
+)
 
 /** 当前上下文的快捷入口：礁区 → 站位 → 样带 → 珊瑚/鱼类 */
 const contextLinks = computed(() => {
@@ -109,6 +125,10 @@ function go(path: string): void {
       <span>
         礁区 {{ reefStore.reefs.length }} · 站位 {{ reefStore.sites.length }} · 样带 {{ beltStore.belts.length }} · 珊瑚记录
         {{ surveyStore.corals.length }} · 计数记录 {{ surveyStore.fishes.length }}
+      </span>
+      <span>
+        报备单 {{ patrolStore.reports.length }} · 禁入期 {{ patrolStore.noEntryPeriods.length }} · 挂起/待核样带
+        {{ pendingCount }} 条
       </span>
     </footer>
   </div>
