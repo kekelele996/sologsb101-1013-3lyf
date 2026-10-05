@@ -91,12 +91,14 @@ export interface UseCoverageResult {
   allBeltCoverages: ComputedRef<BeltCoverage[]>
   /** 全部站位的覆盖度汇总 */
   allSiteCoverages: ComputedRef<SiteCoverage[]>
-  /** 全局白化等级分布 */
+  /** 全局白化等级分布（对外口径：仅已放行样带） */
   globalDistribution: ComputedRef<Record<BleachLevel, number>>
   /** 指定样带的珊瑚记录行（按白化等级降序） */
   coralRows: (beltId: string | null | undefined) => ComputedRef<CoralRow[]>
   /** 指定样带的鱼类计数行 */
   fishRows: (beltId: string | null | undefined) => ComputedRef<Array<{ record: FishCount; density: number }>>
+  /** 是否放行（未对账 / 挂起的样带数据照常可见，但不计入对外结论） */
+  isBeltReleased: (beltId: string | null | undefined) => boolean
 }
 
 /** 白化等级排序权重（用于珊瑚记录行排序） */
@@ -124,6 +126,10 @@ export function useCoverage(): UseCoverageResult {
 
   const siteOf = (siteId: string) => sites.value.find((site) => site.id === siteId) ?? null
   const reefOf = (reefId: string) => reefs.value.find((reef) => reef.id === reefId) ?? null
+  const isBeltReleased = (beltId: string | null | undefined): boolean => {
+    if (!beltId) return false
+    return belts.value.find((belt) => belt.id === beltId)?.clearance?.status === 'released'
+  }
 
   function buildBeltCoverage(beltId: string): BeltCoverage | null {
     const belt = belts.value.find((item) => item.id === beltId)
@@ -180,6 +186,7 @@ export function useCoverage(): UseCoverageResult {
 
   const allBeltCoverages = computed<BeltCoverage[]>(() =>
     belts.value
+      .filter((belt) => belt.clearance?.status === 'released')
       .map((belt) => buildBeltCoverage(belt.id))
       .filter((item): item is BeltCoverage => item !== null)
       .sort((a, b) => b.bleachIndex - a.bleachIndex)
@@ -189,7 +196,8 @@ export function useCoverage(): UseCoverageResult {
     const site = siteOf(siteId)
     if (!site) return null
     const reef = reefOf(site.reefId)
-    const siteBelts = belts.value.filter((belt) => belt.siteId === site.id)
+    // 站点结论只汇总已放行样带；挂起 / 未对账样带的记录不进站点白化结论
+    const siteBelts = belts.value.filter((belt) => belt.siteId === site.id && belt.clearance?.status === 'released')
     const beltIds = new Set(siteBelts.map((belt) => belt.id))
     const siteCorals = corals.value.filter((coral) => beltIds.has(coral.beltId))
     const siteFishes = fishes.value.filter((fish) => beltIds.has(fish.beltId))
@@ -244,9 +252,14 @@ export function useCoverage(): UseCoverageResult {
 
   const globalDistribution = computed<Record<BleachLevel, number>>(() => {
     const distribution = EMPTY_DISTRIBUTION()
+    const releasedBeltIds = new Set(
+      belts.value.filter((belt) => belt.clearance?.status === 'released').map((belt) => belt.id)
+    )
     BLEACH_LEVELS.forEach((level) => {
       distribution[level] = round(
-        corals.value.filter((coral) => coral.bleachLevel === level).reduce((sum, coral) => sum + coral.coverCm, 0),
+        corals.value
+          .filter((coral) => releasedBeltIds.has(coral.beltId) && coral.bleachLevel === level)
+          .reduce((sum, coral) => sum + coral.coverCm, 0),
         1
       )
     })
@@ -292,6 +305,7 @@ export function useCoverage(): UseCoverageResult {
     allSiteCoverages,
     globalDistribution,
     coralRows,
-    fishRows
+    fishRows,
+    isBeltReleased
   }
 }

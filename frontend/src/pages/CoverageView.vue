@@ -13,6 +13,7 @@ import FilterBar from '@/components/common/FilterBar.vue'
 import type { FilterModel } from '@/types/filter'
 import { buildQuery, queryToArray, queryToBool } from '@/types/filter'
 import BleachTag from '@/components/common/BleachTag.vue'
+import ClearanceTag from '@/components/common/ClearanceTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import { useReefStore } from '@/stores/reefStore'
@@ -31,6 +32,7 @@ import {
 } from '@/utils/db'
 import {
   buildBackupPayload,
+  buildCoverageLines,
   buildReefSummaries,
   countPayload,
   exportBackupJson,
@@ -40,6 +42,8 @@ import {
   validateBackup,
   type CountMap
 } from '@/utils/export'
+import { reconcileBelts } from '@/utils/reconcile'
+import { resetPatrolDemoData } from '@/utils/patrolSeed'
 
 const route = useRoute()
 const router = useRouter()
@@ -104,30 +108,13 @@ async function refresh(): Promise<void> {
   lastBackupAt.value = readLastBackupAt()
   stampedVersion.value = readStampedDbVersion()
   const payload = await buildBackupPayload()
-  reefSummaries.value = buildReefSummaries(payload, surveyStore.coverageRows.map((row) => ({
-    beltId: row.beltId,
-    beltNo: row.beltNo,
-    reefId: row.reefId,
-    reefName: row.reefName,
-    siteId: row.siteId,
-    siteNo: row.siteNo,
-    lengthM: row.lengthM,
-    orientation: row.orientation,
-    surveyDate: row.surveyDate,
-    observer: row.observer,
-    coralCount: row.coralCount,
-    coverCmTotal: row.coverCmTotal,
-    coveragePct: row.coveragePct,
-    bleachIndex: row.bleachIndex,
-    grade: row.grade,
-    bleachedSharePct: row.bleachedSharePct,
-    distribution: row.distribution,
-    fishTotal: row.fishTotal,
-    invertebrateTotal: row.invertebrateTotal,
-    fishDensity: row.fishDensity,
-    conclusion: ''
-  })))
+  // 对外礁区结论只取放行样带；内部核对打开开关时一并展示挂起样带
+  const lines = buildCoverageLines(payload, surveyStore.filter.includeHeld)
+  reefSummaries.value = buildReefSummaries(payload, lines, surveyStore.filter.includeHeld)
 }
+
+/** 样带 id → 样带（表格显示放行徽标用） */
+const beltById = computed(() => new Map(surveyStore.belts.map((belt) => [belt.id, belt])))
 
 function handleFilterChange(): void {
   void router.replace({
@@ -143,6 +130,27 @@ function handleFilterChange(): void {
 function handleReset(): void {
   surveyStore.resetFilter()
   void router.replace({ query: {} })
+}
+
+async function toggleIncludeHeld(value: boolean): Promise<void> {
+  surveyStore.patchFilter({ includeHeld: value })
+  await refresh()
+}
+
+async function runReconcile(): Promise<void> {
+  busy.value = true
+  try {
+    const result = await reconcileBelts()
+    const message = `对账完成：共 ${result.total} 条，放行 ${result.released} 条，挂起 ${result.held} 条`
+    if (result.ledgerPending > 0) {
+      ElMessage.warning(`${message}；${result.ledgerPending} 条巡护台账同步失败，已在巡护页排队重试`)
+    } else {
+      ElMessage.success(message)
+    }
+    await refresh()
+  } finally {
+    busy.value = false
+  }
 }
 
 async function handleExport(): Promise<void> {
@@ -188,8 +196,10 @@ async function handleImport(): Promise<void> {
       { type: 'warning', confirmButtonText: '继续导入', cancelButtonText: '取消' }
     )
     await importBackup(payload, overwriteOnImport.value)
+    // 导入的样带重新与巡护队对账（无 clearance 的旧备份默认先挂起）
+    await reconcileBelts()
     await refresh()
-    notice.value = '导入完成，覆盖度汇总已刷新。'
+    notice.value = '导入完成，已按站位与巡护队重新对账，覆盖度汇总已刷新。'
     ElMessage.success(notice.value)
   } finally {
     busy.value = false
@@ -200,7 +210,7 @@ async function handleImport(): Promise<void> {
 async function handleDatabaseReset(): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      '将清空全部本地数据并重新播种演示数据（礁区、站位、样带、珊瑚记录、鱼类计数）。确认继续？',
+      '将清空全部本地数据并重新播种演示数据（普查队样带、巡护队报备与禁入期两侧一起重建，随后全量对账）。确认继续？',
       '重置本地数据',
       { type: 'warning', confirmButtonText: '清空并重建', cancelButtonText: '取消' }
     )
@@ -208,8 +218,10 @@ async function handleDatabaseReset(): Promise<void> {
     return
   }
   await resetDatabase()
+  await resetPatrolDemoData()
+  await reconcileBelts()
   await refresh()
-  notice.value = '本地数据已重置为演示数据。'
+  notice.value = '两侧本地数据已重置为演示数据并完成对账。'
   ElMessage.success(notice.value)
 }
 
@@ -254,15 +266,25 @@ onMounted(() => {
       </div>
       <div class="page__actions">
         <el-button :icon="Refresh" @click="refresh">刷新</el-button>
+        <el-button :loading="busy" @click="runReconcile">全量对账</el-button>
         <el-button @click="copySummary">复制结论</el-button>
         <el-button type="primary" :icon="Download" :loading="busy" @click="handleExport">导出 JSON</el-button>
       </div>
     </div>
 
+    <el-alert
+      type="info"
+      :closable="false"
+      show-icon
+      title="对外白化汇总口径：仅统计已放行（报备已批准且不在禁入期）的样带；挂起与未对账样带的覆盖、白化照常记录但不进结论，待补报通过或撤销禁入期后自动重判放行。"
+    />
+
     <el-alert v-if="notice" type="success" :closable="false" show-icon :title="notice" />
 
     <div class="gb-stats-row">
-      <StatBadge label="样带数" :value="totals.belts" suffix="条" icon="Files" />
+      <StatBadge label="放行样带" :value="surveyStore.clearanceStats.released" suffix="条" tone="success" icon="CircleCheck" />
+      <StatBadge label="挂起样带" :value="surveyStore.clearanceStats.held" suffix="条" tone="warning" icon="Lock" />
+      <StatBadge label="样带数(表内)" :value="totals.belts" suffix="条" icon="Files" />
       <StatBadge label="珊瑚记录" :value="totals.coralCount" suffix="条" tone="info" icon="Histogram" />
       <StatBadge label="覆盖长度合计" :value="totals.coverCmTotal" suffix="cm" tone="success" icon="Odometer" />
       <StatBadge label="平均覆盖率" :value="totals.avgCoveragePct" suffix="%" :percent="Math.min(100, totals.avgCoveragePct)" icon="PieChart" />
@@ -276,33 +298,46 @@ onMounted(() => {
       <StatBadge label="鱼类合计" :value="totals.fishTotal" suffix="尾" tone="warning" icon="TrendCharts" />
     </div>
 
-    <FilterBar
-      :model-value="filterModel"
-      :selects="[
-        {
-          key: 'reefIds',
-          label: '礁区',
-          options: reefStore.reefs.map((reef) => ({ label: reef.name, value: reef.id }))
-        },
-        {
-          key: 'bleachLevels',
-          label: '白化等级',
-          options: BLEACH_LEVELS.map((level) => ({ label: level, value: level }))
-        }
-      ]"
-      :has-switch="true"
-      switch-label="仅看存在白化的样带"
-      :switch-value="surveyStore.filter.onlyBleached"
-      keyword-placeholder="搜索礁区 / 站位 / 样带 / 调查人"
-      @change="handleFilterChange"
-      @reset="handleReset"
-    />
+    <div class="page__scope-bar">
+      <FilterBar
+        :model-value="filterModel"
+        :selects="[
+          {
+            key: 'reefIds',
+            label: '礁区',
+            options: reefStore.reefs.map((reef) => ({ label: reef.name, value: reef.id }))
+          },
+          {
+            key: 'bleachLevels',
+            label: '白化等级',
+            options: BLEACH_LEVELS.map((level) => ({ label: level, value: level }))
+          }
+        ]"
+        :has-switch="true"
+        switch-label="仅看存在白化的样带"
+        :switch-value="surveyStore.filter.onlyBleached"
+        keyword-placeholder="搜索礁区 / 站位 / 样带 / 调查人"
+        @change="handleFilterChange"
+        @reset="handleReset"
+      />
+      <el-card shadow="never" class="gb-panel page__scope-card">
+        <div class="page__scope-line">
+          <span class="gb-hint">汇总口径</span>
+          <el-switch
+            :model-value="surveyStore.filter.includeHeld"
+            active-text="内部核对：含挂起 / 未对账样带"
+            inactive-text="对外口径：仅放行样带"
+            @change="toggleIncludeHeld"
+          />
+        </div>
+      </el-card>
+    </div>
 
     <el-card shadow="never" class="gb-panel">
       <div class="gb-panel-title">
         <h3>白化等级分布（覆盖长度 cm）</h3>
         <span class="gb-hint">
-          总体白化指数 {{ surveyStore.globalStats.bleachIndex }}（{{ surveyStore.globalStats.grade }}）· 白化占比
+          对外口径（仅放行样带）：总体白化指数 {{ surveyStore.globalStats.bleachIndex }}（{{ surveyStore.globalStats.grade }}）· 白化占比
           {{ surveyStore.globalStats.bleachedSharePct }}% · 存在白化样带 {{ totals.bleachedBelts }} 条
         </span>
       </div>
@@ -338,6 +373,11 @@ onMounted(() => {
           <template #default="{ row }">
             <div>{{ row.reefName }}</div>
             <div class="gb-hint">站位 {{ row.siteNo }} · 样带 {{ row.beltNo }}（{{ row.orientation }}向）</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="放行状态" width="150">
+          <template #default="{ row }">
+            <ClearanceTag :clearance="beltById.get(row.beltId)?.clearance" />
           </template>
         </el-table-column>
         <el-table-column label="样带长度" width="110" align="right">
@@ -402,7 +442,9 @@ onMounted(() => {
     <el-card shadow="never" class="gb-panel">
       <div class="gb-panel-title">
         <h3>按礁区的白化评定</h3>
-        <span class="gb-hint">平均白化指数为礁区内各样带白化指数的算术平均</span>
+        <span class="gb-hint">
+          平均白化指数为该礁区已放行样带白化指数的算术平均；挂起 / 未报备样带不进礁区结论
+        </span>
       </div>
       <el-table :data="reefSummaries" border stripe class="gb-table-compact">
         <el-table-column prop="reefName" label="礁区" min-width="160" />
@@ -515,6 +557,24 @@ onMounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.page__scope-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.page__scope-card {
+  padding: 10px 14px;
+}
+
+.page__scope-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 .page__mini-bars {

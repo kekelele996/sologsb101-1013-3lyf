@@ -5,22 +5,26 @@
  */
 import { computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { DataLine, Files, Grid, Odometer, PieChart } from '@element-plus/icons-vue'
+import { DataLine, Document, Files, Grid, Lock, Odometer, PieChart } from '@element-plus/icons-vue'
 import { useReefStore } from '@/stores/reefStore'
 import { useBeltStore } from '@/stores/beltStore'
 import { useSurveyStore } from '@/stores/surveyStore'
+import { usePatrolStore } from '@/stores/patrolStore'
 import { DB_NAME, DB_VERSION } from '@/utils/db'
+import { PATROL_DB_NAME, PATROL_DB_VERSION } from '@/utils/patrolDb'
 
 const route = useRoute()
 const router = useRouter()
 const reefStore = useReefStore()
 const beltStore = useBeltStore()
 const surveyStore = useSurveyStore()
+const patrolStore = usePatrolStore()
 
 onMounted(() => {
   reefStore.start()
   beltStore.start()
   surveyStore.start()
+  patrolStore.start()
 })
 
 /** 层级路由统一归属到最上层导航项 */
@@ -28,12 +32,16 @@ const activeKey = computed(() => {
   if (route.path.startsWith('/reefs/')) return '/reefs'
   if (route.path.startsWith('/sites/')) return '/reefs'
   if (route.path.startsWith('/belts/')) return '/coverage'
+  if (route.path.startsWith('/patrol/closures')) return '/patrol/closures'
+  if (route.path.startsWith('/patrol/')) return '/patrol/filings'
   return route.path
 })
 
 const navItems = computed(() => [
   { key: '/reefs', label: '礁区台账', icon: Odometer, badge: String(reefStore.reefs.length) },
-  { key: '/coverage', label: '覆盖度汇总', icon: PieChart, badge: String(surveyStore.corals.length) }
+  { key: '/coverage', label: '覆盖度汇总', icon: PieChart, badge: String(surveyStore.corals.length) },
+  { key: '/patrol/filings', label: '作业报备', icon: Document, badge: String(patrolStore.filingStats.verifying) },
+  { key: '/patrol/closures', label: '禁入期', icon: Lock, badge: String(patrolStore.activeClosureCount) }
 ])
 
 /** 当前上下文的快捷入口：礁区 → 站位 → 样带 → 珊瑚/鱼类 */
@@ -55,6 +63,10 @@ const contextLinks = computed(() => {
     links.push({ label: '鱼类计数', path: `/belts/${id}/fishes` })
   }
   if (route.path.startsWith('/coverage')) links.push({ label: '礁区台账', path: '/reefs' })
+  if (route.path.startsWith('/patrol/')) {
+    links.push({ label: '作业报备', path: '/patrol/filings' })
+    links.push({ label: '禁入期', path: '/patrol/closures' })
+  }
   return links
 })
 
@@ -104,11 +116,11 @@ function go(path: string): void {
 
     <footer class="app-footer">
       <span>
-        本地库 {{ DB_NAME }} · 结构版本 v{{ DB_VERSION }} · 数据仅存于本浏览器 IndexedDB，不上传任何服务器。
+        普查队库 {{ DB_NAME }} v{{ DB_VERSION }}（样带 / 底质 / 珊瑚覆盖） · 巡护队库 {{ PATROL_DB_NAME }} v{{ PATROL_DB_VERSION }}（报备 / 禁入期 / 台账），均只存于本浏览器 IndexedDB。
       </span>
       <span>
-        礁区 {{ reefStore.reefs.length }} · 站位 {{ reefStore.sites.length }} · 样带 {{ beltStore.belts.length }} · 珊瑚记录
-        {{ surveyStore.corals.length }} · 计数记录 {{ surveyStore.fishes.length }}
+        样带 {{ beltStore.belts.length }}（放行 {{ surveyStore.clearanceStats.released }} · 挂起 {{ surveyStore.clearanceStats.held }}）·
+        报备 {{ patrolStore.filings.length }} · 禁入期 {{ patrolStore.closures.length }}
       </span>
     </footer>
   </div>

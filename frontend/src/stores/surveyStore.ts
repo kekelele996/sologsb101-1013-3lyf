@@ -20,6 +20,12 @@ export interface SurveyFilterState {
   bleachLevels: BleachLevel[]
   /** 是否只看白化指数高于阈值的样带 */
   onlyBleached: boolean
+  /**
+   * 是否把挂起 / 未对账样带也纳入汇总（仅内部核对用）。
+   * 默认 false：对外白化汇总只计已放行样带，挂起或没报备的不进结论，
+   * 保证报出去的礁区情况与巡护队批准记录对得上。
+   */
+  includeHeld: boolean
 }
 
 export function createEmptySurveyFilter(): SurveyFilterState {
@@ -27,8 +33,14 @@ export function createEmptySurveyFilter(): SurveyFilterState {
     keyword: '',
     reefIds: [],
     bleachLevels: [],
-    onlyBleached: false
+    onlyBleached: false,
+    includeHeld: false
   }
+}
+
+/** 是否为可进对外结论的已放行样带 */
+export function isReleased(belt: Belt): boolean {
+  return belt.clearance?.status === 'released'
 }
 
 /** 覆盖度汇总行 */
@@ -186,9 +198,28 @@ export const useSurveyStore = defineStore('survey', () => {
       .sort((a, b) => b.bleachIndex - a.bleachIndex)
   )
 
+  /** 样带放行对账计数（挂起 / 放行 / 未对账） */
+  const clearanceStats = computed(() => {
+    let released = 0
+    let held = 0
+    let unreconciled = 0
+    belts.value.forEach((belt) => {
+      if (belt.clearance?.status === 'released') released += 1
+      else if (belt.clearance?.status === 'held') held += 1
+      else unreconciled += 1
+    })
+    return { released, held, unreconciled, total: belts.value.length }
+  })
+
+  /** 已放行样带：进入对外白化 / 覆盖度结论的口径 */
+  const releasedBelts = computed(() => belts.value.filter(isReleased))
+
   /** 按筛选条件过滤后的覆盖度行 */
   const filteredCoverageRows = computed<CoverageSummaryRow[]>(() =>
     coverageRows.value.filter((row) => {
+      // 挂起 / 未对账（含历史待核）样带默认不进对外汇总；内部核对时可显式纳入
+      const belt = belts.value.find((item) => item.id === row.beltId)
+      if (!filter.value.includeHeld && (belt ? !isReleased(belt) : true)) return false
       const keyword = filter.value.keyword.trim()
       if (keyword.length > 0) {
         const haystack = `${row.reefName}${row.siteNo}${row.beltNo}${row.observer}`
@@ -212,26 +243,28 @@ export const useSurveyStore = defineStore('survey', () => {
       filter.value.onlyBleached
   )
 
-  /** 全局白化等级分布与总体指数 */
+  /** 全局白化等级分布与总体指数（对外口径：仅已放行样带） */
   const globalStats = computed(() => {
+    const releasedBeltIds = new Set(releasedBelts.value.map((belt) => belt.id))
+    const releasedCorals = corals.value.filter((coral) => releasedBeltIds.has(coral.beltId))
     const distribution: Record<BleachLevel, number> = { 无: 0, 轻: 0, 中: 0, 重: 0, 死亡: 0 }
     BLEACH_LEVELS.forEach((level) => {
       distribution[level] = round(
-        corals.value.filter((coral) => coral.bleachLevel === level).reduce((sum, coral) => sum + coral.coverCm, 0),
+        releasedCorals.filter((coral) => coral.bleachLevel === level).reduce((sum, coral) => sum + coral.coverCm, 0),
         1
       )
     })
-    const index = bleachIndex(corals.value)
+    const index = bleachIndex(releasedCorals)
     return {
-      coralCount: corals.value.length,
-      fishCount: fishes.value.length,
+      coralCount: releasedCorals.length,
+      fishCount: fishes.value.filter((fish) => releasedBeltIds.has(fish.beltId)).length,
       coverCmTotal: round(
-        corals.value.reduce((sum, coral) => sum + coral.coverCm, 0),
+        releasedCorals.reduce((sum, coral) => sum + coral.coverCm, 0),
         1
       ),
       bleachIndex: index,
       grade: bleachGrade(index),
-      bleachedSharePct: bleachedSharePct(corals.value),
+      bleachedSharePct: bleachedSharePct(releasedCorals),
       distribution
     }
   })
@@ -384,6 +417,8 @@ export const useSurveyStore = defineStore('survey', () => {
     coralDraft,
     fishDraft,
     beltRecordCounts,
+    clearanceStats,
+    releasedBelts,
     coverageRows,
     filteredCoverageRows,
     hasFilter,

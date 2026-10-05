@@ -7,10 +7,11 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, Edit, Plus, Right, Warning } from '@element-plus/icons-vue'
+import { Delete, Edit, Plus, Right, RefreshRight, Warning } from '@element-plus/icons-vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import BleachTag from '@/components/common/BleachTag.vue'
+import ClearanceTag from '@/components/common/ClearanceTag.vue'
 import RouteMissingPanel from '@/components/common/RouteMissingPanel.vue'
 import { useReefStore } from '@/stores/reefStore'
 import { ORIENTATION_ORDER, useBeltStore } from '@/stores/beltStore'
@@ -19,6 +20,7 @@ import { BELT_LENGTH_PRESETS, ORIENTATIONS } from '@/types/belt'
 import type { Belt, Orientation } from '@/types/belt'
 import { bleachGrade, bleachIndex, coralCoveragePct, fishDensity } from '@/utils/bleach'
 import { initDatabase } from '@/utils/db'
+import { reconcileSite } from '@/utils/reconcile'
 
 const route = useRoute()
 const router = useRouter()
@@ -63,6 +65,49 @@ const rows = computed(() =>
 )
 
 const conflicts = computed(() => beltStore.findBeltConflicts(siteId.value))
+
+/** 本站位对账状态统计 */
+const clearanceStats = computed(() => {
+  const belts = beltStore.beltsOfSite(siteId.value)
+  return {
+    released: belts.filter((belt) => belt.clearance?.status === 'released').length,
+    held: belts.filter((belt) => belt.clearance?.status === 'held').length,
+    pending: belts.filter((belt) => belt.clearance === undefined).length
+  }
+})
+
+const reconciling = ref(false)
+
+/** 录完一批样带后按站位编号 + 日期跟巡护队对账 */
+async function reconcileCurrentSite(): Promise<void> {
+  reconciling.value = true
+  try {
+    const result = await reconcileSite(siteId.value)
+    if (result.total === 0) {
+      ElMessage.info('当前站位还没有样带可对账')
+      return
+    }
+    const base = `对账完成：共 ${result.total} 条，放行 ${result.released} 条，挂起 ${result.held} 条`
+    if (result.ledgerPending > 0) {
+      ElMessage.warning(`${base}；${result.ledgerPending} 条巡护台账同步失败，已在巡护页排队重试（只重试巡护一侧）`)
+    } else if (result.held > 0) {
+      ElMessage.warning(`${base}；挂起样带等补报通过或禁入期撤销后自动重判`)
+    } else {
+      ElMessage.success(base)
+    }
+  } finally {
+    reconciling.value = false
+  }
+}
+
+/** 挂起样带去巡护队补报：带上礁区名、站位编号与该样带调查日期预填 */
+function goSupplement(belt: Belt): void {
+  if (!reef.value) return
+  void router.push({
+    path: '/patrol/filings',
+    query: { reef: reef.value.name, site: site.value?.no ?? '', date: belt.surveyDate }
+  })
+}
 
 const stats = computed(() => {
   const belts = beltStore.beltsOfSite(siteId.value)
@@ -146,6 +191,8 @@ async function submitForm(): Promise<void> {
       ElMessage.success(`样带 ${created.no}（${created.orientation}向 ${created.lengthM} m）已布设，可录入底质与珊瑚计数`)
     }
     dialogVisible.value = false
+    // 布设 / 改期后按站位自动跟巡护队重新对账（普查结论立即生效）
+    await reconcileSite(siteId.value)
   } finally {
     submitting.value = false
   }
@@ -231,10 +278,11 @@ onMounted(() => {
             <el-tag size="small" type="info" effect="plain">{{ site.substrate }}</el-tag>
           </h2>
           <p class="gb-hint">
-            布设样带后录入长度、朝向与调查日期；同朝向内样带编号不可重复，列表按北 → 东 → 南 → 西排序。
+            布设样带后录入长度、朝向与调查日期；同朝向内样带编号不可重复，列表按北 → 东 → 南 → 西排序。录完一批后与巡护队按站位编号 + 日期对账，挂起样带数据照录但不进白化汇总。
           </p>
         </div>
         <div class="page__actions">
+          <el-button :icon="RefreshRight" :loading="reconciling" @click="reconcileCurrentSite">与巡护队对账</el-button>
           <el-button :icon="Warning" @click="applyOrientationOrder">朝向排序校验</el-button>
           <el-button type="primary" :icon="Plus" @click="openCreate">新增样带</el-button>
         </div>
@@ -243,6 +291,8 @@ onMounted(() => {
       <div class="gb-stats-row">
         <StatBadge label="样带条数" :value="stats.beltCount" suffix="条" icon="Files" />
         <StatBadge label="累计长度" :value="stats.totalLength" suffix="m" tone="info" icon="Odometer" />
+        <StatBadge label="已放行" :value="clearanceStats.released" suffix="条" tone="success" icon="CircleCheck" />
+        <StatBadge label="挂起" :value="clearanceStats.held" suffix="条" tone="warning" icon="Lock" />
         <StatBadge label="珊瑚记录" :value="stats.coralCount" suffix="条" tone="success" icon="Histogram" />
         <StatBadge label="计数记录" :value="stats.fishCount" suffix="条" tone="warning" icon="DataLine" />
       </div>
@@ -253,6 +303,18 @@ onMounted(() => {
         show-icon
         :closable="false"
         :title="`朝向排序校验提示：${conflicts.join('、')} 存在重复编号，请调整后再开展普查`"
+      />
+
+      <el-alert
+        v-if="clearanceStats.held > 0 || clearanceStats.pending > 0"
+        type="error"
+        show-icon
+        :closable="false"
+        :title="
+          `${clearanceStats.held > 0 ? `${clearanceStats.held} 条样带挂起（没批准范围或落在禁入期，可去巡护队补报）` : ''}` +
+          `${clearanceStats.held > 0 && clearanceStats.pending > 0 ? '；' : ''}` +
+          `${clearanceStats.pending > 0 ? `${clearanceStats.pending} 条尚未对账` : ''}`
+        "
       />
 
       <EmptyPanel
@@ -305,6 +367,21 @@ onMounted(() => {
           <template #default="{ row }">
             <BleachTag :level="row.grade" size="small" />
             <div class="gb-hint gb-mono">指数 {{ row.bleachIndex }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="对账放行" width="220">
+          <template #default="{ row }">
+            <ClearanceTag :clearance="row.belt.clearance" />
+            <el-button
+              v-if="row.belt.clearance?.status !== 'released'"
+              link
+              type="warning"
+              size="small"
+              @click="goSupplement(row.belt)"
+            >
+              去补报 / 重判
+            </el-button>
+            <div v-if="row.belt.clearance?.reconcileNote" class="gb-hint">{{ row.belt.clearance.reconcileNote }}</div>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="260" fixed="right">

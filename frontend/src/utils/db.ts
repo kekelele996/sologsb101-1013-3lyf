@@ -6,6 +6,7 @@
  * - 纯前端应用：不依赖任何后端服务或数据库服务
  */
 import Dexie, { liveQuery, type Table } from 'dexie'
+import { createId } from '@/utils/id'
 import type { Reef } from '@/types/reef'
 import type { Site } from '@/types/site'
 import type { Belt } from '@/types/belt'
@@ -13,7 +14,7 @@ import type { CoralRecord } from '@/types/coralRecord'
 import type { FishCount } from '@/types/fishCount'
 
 /** 当前数据结构版本号：每次调整字段结构必须 +1 并补迁移 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** 数据库名（浏览器 IndexedDB 中的库名） */
 export const DB_NAME = 'gbcoralbelt'
@@ -22,7 +23,9 @@ export const DB_NAME = 'gbcoralbelt'
 export const LS_KEYS = {
   dbVersion: 'gbcoralbelt:db-version',
   lastBackupAt: 'gbcoralbelt:last-backup-at',
-  lastReefId: 'gbcoralbelt:last-reef-id'
+  lastReefId: 'gbcoralbelt:last-reef-id',
+  /** v2 → v3 旧库升级标记：升级后按调查日期向巡护队一侧回填报备单（待核） */
+  legacyV3Pending: 'gbcoralbelt:legacy-backfill-v3-pending'
 } as const
 
 /** 备份文件结构，供 utils/export.ts 与覆盖度汇总页使用 */
@@ -86,15 +89,58 @@ export class CoralBeltDatabase extends Dexie {
             })
         }
       })
+
+    // v3：样带增加与巡护队对账的放行状态（clearance）。
+    // 旧数据没有报备记录：先在普查侧把存量样带挂起并标成待核回填，
+    // 升级完成后由 patrol 域服务按调查日期向巡护队一侧回填一版报备单（status=verifying）再统一重判。
+    this.version(DB_VERSION)
+      .stores({
+        reefs: 'id, name, location, protectStatus, areaKm2, manager, updatedAt',
+        sites: 'id, reefId, no, lat, lng, depthM, substrate, updatedAt',
+        belts: 'id, siteId, no, lengthM, orientation, surveyDate, observer, clearance.status, updatedAt',
+        corals: 'id, beltId, genus, form, coverCm, bleachLevel, updatedAt',
+        fishes: 'id, beltId, family, count, sizeClass, category, updatedAt'
+      })
+      .upgrade((tx) => {
+        try {
+          localStorage.setItem(LS_KEYS.legacyV3Pending, '1')
+        } catch {
+          // 隐私模式下 localStorage 不可用：无法触发回填，旧样带保持挂起，可在巡护页手工补报
+        }
+        return tx
+          .table('belts')
+          .toCollection()
+          .modify((belt: Record<string, unknown>) => {
+            // 已带对账结论的不重标（理论上不存在，纯防御）
+            if (belt.clearance && typeof belt.clearance === 'object') return
+            belt.clearance = {
+              status: 'held',
+              holdReason: 'verifying',
+              closureNo: null,
+              filingNo: null,
+              reconciledAt: null,
+              reconcileNote: '旧数据升级：报备记录待核回填'
+            }
+            belt.updatedAt = Date.now()
+          })
+      })
   }
 }
 
 export const db = new CoralBeltDatabase()
 
-/** 生成主键：短前缀 + 时间戳 + 随机串，避免多标签页写入冲突 */
-export function createId(prefix: string): string {
-  const rand = Math.random().toString(36).slice(2, 8)
-  return `${prefix}_${Date.now().toString(36)}${rand}`
+/** 主键生成统一走 utils/id（普查库与巡护库共用），这里保留导出以兼容既有引用 */
+export { createId }
+
+/** 读取并清除 v2→v3 旧库回填标记（消费一次） */
+export function consumeLegacyBackfillPending(): boolean {
+  try {
+    const pending = localStorage.getItem(LS_KEYS.legacyV3Pending) === '1'
+    if (pending) localStorage.removeItem(LS_KEYS.legacyV3Pending)
+    return pending
+  } catch {
+    return false
+  }
 }
 
 /** 订阅单表变化（liveQuery），返回取消订阅函数 */

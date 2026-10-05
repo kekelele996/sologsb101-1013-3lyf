@@ -43,6 +43,18 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/pages/CoverageView.vue'),
     meta: { title: '白化等级评定与覆盖度汇总', icon: 'PieChart' }
   },
+  {
+    path: '/patrol/filings',
+    name: 'patrol-filings',
+    component: () => import('@/pages/PatrolFilings.vue'),
+    meta: { title: '巡护队 · 作业报备与批准站位', icon: 'Document' }
+  },
+  {
+    path: '/patrol/closures',
+    name: 'patrol-closures',
+    component: () => import('@/pages/PatrolClosures.vue'),
+    meta: { title: '巡护队 · 禁入期管理', icon: 'Lock' }
+  },
   { path: '/:pathMatch(.*)*', redirect: '/reefs' }
 ]
 

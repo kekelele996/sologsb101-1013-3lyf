@@ -40,20 +40,22 @@ const form = reactive({
   manager: ''
 })
 
-/** 礁区卡片：汇总站位/样带/珊瑚记录数与平均白化指数 */
+/** 礁区卡片：汇总站位/样带/珊瑚记录数与平均白化指数（白化口径仅放行样带） */
 const cards = computed(() =>
   reefStore.filteredReefs.map((reef: Reef) => {
     const sites = reefStore.sites.filter((site) => site.reefId === reef.id)
     const siteIds = new Set(sites.map((site) => site.id))
     const belts = beltStore.belts.filter((belt) => siteIds.has(belt.siteId))
-    const beltIds = new Set(belts.map((belt) => belt.id))
-    const corals = surveyStore.corals.filter((coral) => beltIds.has(coral.beltId))
-    const fishes = surveyStore.fishes.filter((fish) => beltIds.has(fish.beltId))
+    const releasedBelts = belts.filter((belt) => belt.clearance?.status === 'released')
+    const releasedBeltIds = new Set(releasedBelts.map((belt) => belt.id))
+    const corals = surveyStore.corals.filter((coral) => releasedBeltIds.has(coral.beltId))
+    const fishes = surveyStore.fishes.filter((fish) => releasedBeltIds.has(fish.beltId))
     const index = bleachIndex(corals)
     return {
       reef,
       siteCount: sites.length,
       beltCount: belts.length,
+      heldCount: belts.filter((belt) => belt.clearance?.status !== 'released').length,
       coralCount: corals.length,
       fishTotal: fishes.reduce((sum, fish) => sum + fish.count, 0),
       bleachIndex: index,
@@ -286,6 +288,15 @@ watch(
         <div class="reef-card__stats">
           <StatBadge label="站位" :value="card.siteCount" suffix="个" size="small" tone="info" icon="Grid" />
           <StatBadge label="样带" :value="card.beltCount" suffix="条" size="small" icon="Files" />
+          <StatBadge
+            v-if="card.heldCount > 0"
+            label="挂起未计"
+            :value="card.heldCount"
+            suffix="条"
+            size="small"
+            tone="warning"
+            icon="Lock"
+          />
           <StatBadge label="珊瑚记录" :value="card.coralCount" suffix="条" size="small" tone="success" icon="Histogram" />
           <StatBadge
             label="白化指数"

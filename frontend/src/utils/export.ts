@@ -191,8 +191,8 @@ export interface CoverageLine {
   conclusion: string
 }
 
-/** 按样带生成覆盖度结论行 */
-export function buildCoverageLines(payload: BackupPayload): CoverageLine[] {
+/** 按样带生成覆盖度结论行（对外口径默认只含已放行样带；挂起 / 未对账不进白化汇总） */
+export function buildCoverageLines(payload: BackupPayload, includeHeld = false): CoverageLine[] {
   const reefById = new Map(payload.reefs.map((reef) => [reef.id, reef]))
   const siteById = new Map(payload.sites.map((site) => [site.id, site]))
   const coralsByBelt = new Map<string, typeof payload.corals>()
@@ -209,6 +209,7 @@ export function buildCoverageLines(payload: BackupPayload): CoverageLine[] {
   })
 
   return payload.belts
+    .filter((belt) => includeHeld || belt.clearance?.status === 'released')
     .map((belt) => {
       const site = siteById.get(belt.siteId)
       const reef = site ? reefById.get(site.reefId) : undefined
@@ -277,12 +278,22 @@ export interface ReefSummary {
   fishTotal: number
 }
 
-export function buildReefSummaries(payload: BackupPayload, lines: CoverageLine[]): ReefSummary[] {
+export function buildReefSummaries(
+  payload: BackupPayload,
+  lines: CoverageLine[],
+  includeHeld = false
+): ReefSummary[] {
   return payload.reefs.map((reef) => {
     const siteIds = new Set(payload.sites.filter((site) => site.reefId === reef.id).map((site) => site.id))
-    const beltIds = new Set(payload.belts.filter((belt) => siteIds.has(belt.siteId)).map((belt) => belt.id))
+    // 礁区结论只统计已放行样带，与巡护队批准记录对齐
+    const beltIds = new Set(
+      payload.belts
+        .filter((belt) => siteIds.has(belt.siteId))
+        .filter((belt) => includeHeld || belt.clearance?.status === 'released')
+        .map((belt) => belt.id)
+    )
     const corals = payload.corals.filter((coral) => beltIds.has(coral.beltId))
-    const lines4Reef = lines.filter((line) => line.reefId === reef.id)
+    const lines4Reef = lines.filter((line) => line.reefId === reef.id && beltIds.has(line.beltId))
     const avgBleachIndex =
       lines4Reef.length === 0
         ? 0

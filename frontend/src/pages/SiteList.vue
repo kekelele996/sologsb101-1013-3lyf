@@ -54,12 +54,14 @@ const rows = computed(() => {
   })
   return sites.map((site) => {
     const belts = beltStore.beltsOfSite(site.id)
-    const beltIds = new Set(belts.map((belt) => belt.id))
-    const corals = surveyStore.corals.filter((coral) => beltIds.has(coral.beltId))
+    const releasedBelts = belts.filter((belt) => belt.clearance?.status === 'released')
+    const releasedBeltIds = new Set(releasedBelts.map((belt) => belt.id))
+    const corals = surveyStore.corals.filter((coral) => releasedBeltIds.has(coral.beltId))
     const index = bleachIndex(corals)
     return {
       site,
       beltCount: belts.length,
+      heldCount: belts.length - releasedBelts.length,
       beltLengthM: belts.reduce((sum, belt) => sum + belt.lengthM, 0),
       coralCount: corals.length,
       bleachIndex: index,
@@ -303,10 +305,11 @@ onMounted(() => {
             <span class="gb-mono">{{ row.coralCount }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="平均白化" width="150">
+        <el-table-column label="平均白化（放行口径）" width="190">
           <template #default="{ row }">
             <BleachTag :level="row.grade" :size="'small'" />
             <span class="gb-hint gb-mono"> {{ row.bleachIndex }}</span>
+            <div v-if="row.heldCount > 0" class="gb-hint">挂起 {{ row.heldCount }} 条不计入</div>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="240" fixed="right">
